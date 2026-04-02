@@ -1,11 +1,8 @@
 name: Flight Price Check
 
 on:
-  # 6 runs/day at Buenos Aires times (UTC-3):
-  # 8am, 11am, 1pm, 4pm, 7pm, 10pm → UTC: 11:00, 14:00, 16:00, 19:00, 22:00, 01:00
   schedule:
     - cron: "0 11,14,16,19,22,1 * * *"
-  # Allow manual trigger from GitHub UI
   workflow_dispatch:
 
 jobs:
@@ -13,20 +10,90 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install requests
+        run: pip install requests
 
       - name: Run flight tracker
         env:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python tracker.py
+        run: |
+          cat << 'PYTHON' > tracker.py
+          import os, sys, requests
+          from datetime import datetime
+
+          SERPAPI_KEY = os.environ.get("SERPAPI_KEY")
+          TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+          TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+          GOOGLE_FLIGHTS_LINK = "https://www.google.com/travel/flights?q=flights+from+MUC+to+MAD+on+2026-05-15&type=one-way&stops=nonstop"
+
+          if not all([SERPAPI_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
+              print("Missing env vars", file=sys.stderr)
+              sys.exit(1)
+
+          def send_telegram(msg):
+              try:
+                  requests.post(
+                      f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                      json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
+                      timeout=15
+                  )
+              except Exception as e:
+                  print(f"Telegram error: {e}", file=sys.stderr)
+
+          def is_evening(time_str):
+              try:
+                  hour = int(time_str.strip().split(" ")[-1].split(":")[0])
+                  return hour >= 20 or hour < 2
+              except:
+                  return False
+
+          try:
+              resp = requests.get("https://serpapi.com/search", params={
+                  "engine": "google_flights", "departure_id": "MUC", "arrival_id": "MAD",
+                  "outbound_date": "2026-05-15", "type": "2", "stops": "1",
+                  "currency": "EUR", "hl": "en", "gl": "de", "api_key": SERPAPI_KEY
+              }, timeout=30)
+              if resp.status_code == 429:
+                  print("Rate limited", file=sys.stderr)
+                  sys.exit(0)
+              resp.raise_for_status()
+              data = resp.json()
+          except Exception as e:
+              send_telegram(f"⚠️ Flight tracker: API check failed: {e}. Will retry next run.")
+              sys.exit(0)
+
+          flights = []
+          for option in data.get("best_flights", []) + data.get("other_flights", []):
+              legs = option.get("flights", [])
+              price = option.get("price")
+              if not legs or price is None or len(legs) != 1:
+                  continue
+              leg = legs[0]
+              dep = leg.get("departure_airport", {}).get("time", "")
+              arr = leg.get("arrival_airport", {}).get("time", "")
+              if not is_evening(arr):
+                  continue
+              flights.append({"airline": leg.get("airline", "?"), "flight_number": leg.get("flight_number", "?"), "departure": dep, "arrival": arr, "price": price})
+
+          flights.sort(key=lambda f: f["price"])
+
+          if not flights:
+              send_telegram("✈️ No direct evening flights found for MUC→MAD on May 15.")
+              sys.exit(0)
+
+          cheap = [f for f in flights if f["price"] < 200]
+          if cheap:
+              lines = ["🚨 <b>CHEAP FLIGHT ALERT!</b> 🚨\n"]
+              for f in cheap:
+                  lines.append(f"✈️ {f['airline']} {f['flight_number']}\n🕐 Departs: {f['departure']} → Arrives: {f['arrival']}\n💰 <b>PRICE: {f['price']} EUR</b>\n")
+              lines.append(f'🔗 <a href="{GOOGLE_FLIGHTS_LINK}">Book now on Google Flights</a>')
+              send_telegram("\n".join(lines))
+          else:
+              best = flights[0]
+              send_telegram(f"No deals yet. Cheapest direct MUC→MAD May 15: <b>{best['price']} EUR</b> with {best['airline']} at {best['departure']}. Tracking continues.")
+
+          print(f"Done. {len(flights)} flights checked.")
+          PYTHON
+          python tracker.py

@@ -1,0 +1,41 @@
+name: Flight Price Check
+
+on:
+  # 6 runs/day at Buenos Aires times (UTC-3):
+  # 8am, 11am, 1pm, 4pm, 7pm, 10pm → UTC: 11:00, 14:00, 16:00, 19:00, 22:00, 01:00
+  schedule:
+    - cron: "0 11,14,16,19,22,1 * * *"
+  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
+
+jobs:
+  check-prices:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run flight tracker
+        env:
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python tracker.py
+
+      - name: Save price history
+        # Commit the updated CSV back to the repo so we keep a running log
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add price_history.csv
+          git diff --staged --quiet || git commit -m "Update price history $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
